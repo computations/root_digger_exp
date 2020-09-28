@@ -74,7 +74,7 @@ class dataset:
 
     @property
     def lwr_tree_path(self):
-        return os.path.join(self._path_prefix,
+        return os.path.join(self._working_dir_prefix,
                             self._results_prefix + ".lwr.tree")
 
     @property
@@ -195,7 +195,7 @@ for k, d in datasets.items():
     directory_root = d['directory']
     for dataset_dict in d['datasets']:
         try:
-            ds = dataset(os.getcwd(), dataset_prefix, dataset_path,
+            ds = dataset(os.getcwd(), datasets_prefix, dataset_path,
                          args.prefix, dataset_dict)
             if args.runrd:
                 drawlh.draw_lh(ds.tree_path, ds.image_path, ds.lwr_tree_path,

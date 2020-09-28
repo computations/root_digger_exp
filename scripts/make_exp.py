@@ -44,15 +44,6 @@ CONTROL_FILE = """
 [EVOLVE] p1 1 seqs
 """
 
-PERF = r"perf record -m 8 -g -o {program_name}.perf.data {program}"
-
-RD_ES = os.path.abspath(
-    "/home/computations/hits/root_digger/bin/rd"
-) + " --prefix {prefix} --msa {msa} --tree {tree} --seed {seed} --verbose --early-stop --threads 1"
-RD_NES = os.path.abspath(
-    "/home/computations/hits/root_digger/bin/rd"
-) + " --prefix {prefix} --msa {msa} --tree {tree} --seed {seed} --verbose --no-early-stop --threads 1"
-IQTREE = "iqtree -m 12.12+G4 -s {msa} -te {tree} -pre {prefix} -seed {seed} -nt 1"
 model_file = "subst.model"
 freqs_file = "freqs.model"
 
@@ -104,7 +95,7 @@ class subst_params:
 
 class freq_params:
     def __init__(self):
-        self._params = numpy.random.exponential(size=4)
+        self._params = numpy.random.exponential(size=4) + 1e-2
         self._params /= numpy.linalg.norm(self._params, 1)
 
     def indel_repr(self):
@@ -123,6 +114,8 @@ class exp:
                  run_iter,
                  trees,
                  aligns,
+                 partition_rd=None,
+                 partition_iq=None,
                  run_rd=True,
                  run_iq=True,
                  profile=False,
@@ -131,6 +124,14 @@ class exp:
         self._run_iq = run_iq
         self._run_iter = run_iter
         self._profile = profile
+        self._run_es = True
+        self._run_nes = True
+        if not partition_rd is None:
+            self._partition_rd = open(partition_rd).read()
+            self._partition_iq = open(partition_iq).read()
+        else:
+            self._partition_rd = None
+            self._partition_iq = None
         leading_zeroes = math.ceil(math.log10(TOTAL_ITERS))
         self._run_path = os.path.abspath(
             os.path.join(
@@ -159,7 +160,7 @@ class exp:
                 t = ete3.Tree()
                 t.populate(tree)
                 for n in t.traverse():
-                    n.dist = numpy.random.exponential(0.5)
+                    n.dist = numpy.random.exponential(0.49) + 0.01
                 with open(os.path.join(self._run_path,
                                        str(tree) + ".rtree"),
                           'w') as tree_file:
@@ -255,15 +256,16 @@ class exp:
             control_txt.write(
                 self.make_indel_control_file(freqs, subst, tree, sites))
         if not self.check_done_indel('.'):
-            subprocess.run("indelible", stdout=subprocess.DEVNULL)
+            subprocess.run(INDELIBLE, stdout=subprocess.DEVNULL)
             self.set_indel_done('.')
 
     def run_rd_es(self, tree_filename, msa):
-        rd_output = subprocess.run(RD_ES.format(prefix="rd_es",
-                                                msa=msa,
-                                                tree=os.path.join(
-                                                    "../", tree_filename),
-                                                seed=self._seed).split(' '),
+        rd_output = subprocess.run(RD_ES.format(
+            prefix="rd_es",
+            msa=msa,
+            tree=os.path.join("../", tree_filename),
+            seed=self._seed,
+            partition='partition.txt').split(' '),
                                    stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE)
         with open('rd_output_es', 'w') as logfile:
@@ -285,11 +287,12 @@ class exp:
                        stderr=subprocess.PIPE)
 
     def run_rd_no_es(self, tree_filename, msa):
-        rd_output = subprocess.run(RD_NES.format(prefix="rd_nes",
-                                                 msa=msa,
-                                                 tree=os.path.join(
-                                                     "../", tree_filename),
-                                                 seed=self._seed).split(' '),
+        rd_output = subprocess.run(RD_NES.format(
+            prefix="rd_nes",
+            msa=msa,
+            tree=os.path.join("../", tree_filename),
+            seed=self._seed,
+            partition='partition.txt').split(' '),
                                    stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE)
         with open('rd_output_nes', 'w') as logfile:
@@ -314,7 +317,8 @@ class exp:
         subprocess.run(IQTREE.format(msa=msa,
                                      tree=tree_filename,
                                      prefix=msa,
-                                     seed=self._seed).split(),
+                                     seed=self._seed,
+                                     partition='partition.nex').split(),
                        stdout=subprocess.DEVNULL)
         if self._profile:
             self.run_iqtree_profile(tree_filename, msa)
@@ -331,8 +335,10 @@ class exp:
 
     def run_exp(self, tree_filename, msa):
         if not self.check_done_rd('.') and self._run_rd:
-            self.run_rd_es(tree_filename, msa)
-            self.run_rd_no_es(tree_filename, msa)
+                if self._run_es:
+                    self.run_rd_es(tree_filename, msa)
+                if self._run_nes:
+                    self.run_rd_no_es(tree_filename, msa)
         if not self.check_done_iqtree('.') and self._run_iq:
             self.run_iqtree(tree_filename, msa)
 
@@ -387,6 +393,12 @@ class exp:
                     align_filename = str(align_name) + ".fasta"
                     with open(align_filename, 'w') as align_file:
                         SeqIO.write(align, align_file, 'fasta')
+                    if not self._partition_rd is None:
+                        with open('partition.txt', 'w') as partfile:
+                            partfile.write(self._partition_rd)
+                    if not self._partition_iq is None:
+                        with open('partition.nex', 'w') as partfile:
+                            partfile.write(self._partition_iq)
                     self.run_exp(tree_file, msa=align_filename)
                 exp_key = (tree_name, align_name)
                 if self._run_rd:
@@ -399,7 +411,10 @@ class exp:
                 if self._run_iq:
                     self._iqtree_results.append(
                         iqtree_result(tree_name, align_name, exp_dir,
-                                      true_tree_ete, align_filename))
+                                      true_tree_ete, align_filename
+                                      ) if args.partition_iq is None else
+                        iqtree_result(tree_name, align_name, exp_dir,
+                                      true_tree_ete, 'a.fasta'))
 
         PROGRESS_BAR.update(PROGRESS_BAR_ITER.value)
         PROGRESS_BAR_ITER.value += 1
@@ -861,7 +876,16 @@ def base26_encode(index, maximum):
     return ''.join(bases)
 
 
+def extract_alignment_type(path):
+    ext = os.path.splitext(path)[1].strip('.')
+    if ext == 'fas':
+        return 'fasta'
+    return ext
+
+
 if __name__ == "__main__":
+    PERF = r"perf record -m 8 -g -o {program_name}.perf.data {program}"
+
     parser = argparse.ArgumentParser()
     parser.add_argument('--path',
                         type=str,
@@ -869,15 +893,18 @@ if __name__ == "__main__":
                         required=True)
     parser.add_argument('--msa', nargs='+', type=str, required=True)
     parser.add_argument('--trees', nargs='+', type=str, required=True)
+    parser.add_argument('--partition-rd', type=str)
+    parser.add_argument('--partition-iq', type=str)
     parser.add_argument('--iters', type=int, required=True)
     parser.add_argument('--procs', type=int, default=None)
-    parser.add_argument('--atol', type=float, default=1e-4)
-    parser.add_argument('--factor', type=float, default=1e7)
-    parser.add_argument('--bfgstol', type=float, default=1e-4)
     parser.add_argument('--run-rd', dest='runrd', action='store_true')
     parser.add_argument('--run-iq-tree', dest='runiq', action='store_true')
     parser.add_argument('--no-run-rd', dest='runrd', action='store_false')
     parser.add_argument('--no-run-iq-tree', dest='runiq', action='store_false')
+    parser.add_argument('--rd-exhaustive', dest='exhaustive', action='store_true', default=False)
+    parser.add_argument('--rd', type=str)
+    parser.add_argument('--iq', type=str)
+    parser.add_argument('--indelible', type=str)
     parser.add_argument('--profile',
                         dest='profile',
                         action='store_true',
@@ -885,18 +912,44 @@ if __name__ == "__main__":
     parser.set_defaults(runrd=True)
     parser.set_defaults(runiq=True)
     args = parser.parse_args()
+    if not args.partition_rd is None:
+        args.partition_rd = os.path.abspath(args.partition_rd)
+    if not args.partition_iq is None:
+        args.partition_iq = os.path.abspath(args.partition_iq)
 
-    #    if args.profile and args.procs > 1:
-    #        print("Please only use one proc when using profiling")
+    if args.runrd and args.rd is None:
+        print("Please specify the path to root digger with the --rd option")
 
-    RD_ES += " --atol {atol} --factor {factor} --bfgstol {bfgstol}".format(
-        atol=args.atol, factor=args.factor, bfgstol=args.bfgstol)
-    RD_NES += " --atol {atol} --factor {factor} --bfgstol {bfgstol}".format(
-        atol=args.atol, factor=args.factor, bfgstol=args.bfgstol)
+    if args.runiq and args.iq is None:
+        print("Please specify the path to iqtree with the --iq option")
 
-    if args.runiq and not shutil.which("iqtree"):
-        print("Please add iqtree to your path")
-        sys.exit()
+    if (not args.partition_rd is None or not args.partition_iq is None) and (
+            args.partition_rd is None or args.partition_iq is None):
+        print("please specify both partition files")
+        sys.exit(1)
+
+    if args.runrd:
+        RD_ES = os.path.abspath(
+            args.rd
+        ) + " --prefix {prefix} --msa {msa} --tree {tree} --seed {seed} --verbose --early-stop --threads 1"
+        RD_NES = os.path.abspath(
+            args.rd
+        ) + " --prefix {prefix} --msa {msa} --tree {tree} --seed {seed} --verbose --no-early-stop --threads 1"
+        if not args.partition_rd is None:
+            RD_ES += " --partition {partition}"
+            RD_NES += " --partition {partition}"
+        else:
+            RD_ES += " --rate-cats 4"
+            RD_NES += " --rate-cats 4"
+        if args.exhaustive:
+            RD_ES += " --exhaustive"
+            RD_NES += " --exhaustive"
+    if args.runiq:
+        IQTREE = os.path.abspath(
+            args.iq
+        ) + " -m 12.12+G4 -s {msa} -te {tree} -pre {prefix} -seed {seed} -nt 1"
+        if not args.partition_iq is None:
+            IQTREE += " -p {partition}"
 
     trees = []
     for tree in args.trees:
@@ -909,14 +962,14 @@ if __name__ == "__main__":
     aligns = []
     for align in args.msa:
         try:
-            if not shutil.which("indelible"):
-                print("Please add indelible to your path")
+            if args.indelible is None:
+                print("Please specify the --indelible option")
                 sys.exit()
+            INDELIBLE = os.path.abspath(args.indelible)
             aligns.append(int(align))
         except ValueError:
             aligns.append(
-                list(SeqIO.parse(align,
-                                 os.path.splitext(align)[1].strip('.'))))
+                list(SeqIO.parse(align, extract_alignment_type(align))))
 
     exp_path = os.path.abspath(args.path)
     TOTAL_ITERS = args.iters
@@ -930,8 +983,8 @@ if __name__ == "__main__":
         experiments = []
         for i in range(TOTAL_ITERS):
             experiments.append(
-                exp('.', i, trees, aligns, args.runrd, args.runiq,
-                    args.profile))
+                exp('.', i, trees, aligns, args.partition_rd,
+                    args.partition_iq, args.runrd, args.runiq, args.profile))
 
         PROGRESS_BAR.update(PROGRESS_BAR_ITER.value)
         PROGRESS_BAR_ITER.value += 1
